@@ -79,7 +79,7 @@ struct Config{
 #define TRIGGER_PIN 5
 SSD1306Wire  display(0x3c, 04, 15);
 const char *config_filename = "/config.json"; 
-Config configuration = {60,2,20,TRIGGER_PIN,"/test.bmp","sta","MEO-AADB7D","49809012A8","LED_PainterAP",""};
+Config configuration = {60,2,20,TRIGGER_PIN,"/test.bmp","sta","SSID","PWD","LED_PainterAP",""};
 
 String getContentType(String filename); // convert the file extension to the MIME type
 bool handleFileRead(String path);       // send the right file to the client (if it exists)
