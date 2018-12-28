@@ -20,20 +20,25 @@
  * 
 */
 
-#include <ESP8266WiFi.h>
+#include <WiFi.h>
 #include <WiFiClient.h>
-#include <ESP8266WiFiMulti.h>
-#include <ESP8266mDNS.h>
-#include <ESP8266WebServer.h>
+#include <WiFiMulti.h>
+#include <mDNS.h>
+#include <WebServer.h>
 #include <FS.h>   // Include the SPIFFS library
+#include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <string.h>
+#include <SSD1306Wire.h>
 #include "LED_Painter.h"
 
-ESP8266WiFiMulti wifiMulti;     // Create an instance of the ESP8266WiFiMulti class, called 'wifiMulti'
+static int64_t lastActionTime;
+const int64_t InactionTimeout = 1 * 60 * 1000UL;
 
-ESP8266WebServer server(80);    // Create a webserver object that listens for HTTP request on port 80
+WiFiMulti wifiMulti;     // Create an instance of the ESP8266WiFiMulti class, called 'wifiMulti'
+
+WebServer server(80);    // Create a webserver object that listens for HTTP request on port 80
 
 File fsUploadFile;              // a File object to temporarily store the received file
 
@@ -71,10 +76,10 @@ struct Config{
   char ap_pass[32];
 };
 
-#define TRIGGER_PIN D2
-
+#define TRIGGER_PIN 5
+SSD1306Wire  display(0x3c, 04, 15);
 const char *config_filename = "/config.json"; 
-Config configuration = {60,14,20,TRIGGER_PIN,"/test.bmp","sta","YourSSID","YourPass","LED_PainterAP","ledpainter"};
+Config configuration = {60,2,20,TRIGGER_PIN,"/test.bmp","sta","MEO-AADB7D","49809012A8","LED_PainterAP",""};
 
 String getContentType(String filename); // convert the file extension to the MIME type
 bool handleFileRead(String path);       // send the right file to the client (if it exists)
@@ -90,51 +95,72 @@ int load_config();
 int write_config();
 int start_sta();
 int start_ap();
+void writeln(const char* text);
+void write(const char* text);
 void drawBMP(char *filename);
-
+void clear();
 int start_sta(){
   wifiMulti.addAP(configuration.sta_ssid, configuration.sta_pass);   // add Wi-Fi networks you want to connect to
-
-    
-  Serial.println("Connecting ...");
+   
+  
+  writeln("Connecting ...");
   int i = 0;
   while (wifiMulti.run() != WL_CONNECTED) { // Wait for the Wi-Fi to connect
     delay(1000);
-    Serial.print(++i); Serial.print(' ');
-    if(i > 10){
-      Serial.println('\n');
-      Serial.print("Failed to Connect: Timeout ");
+    
+    write(".");
+    if(i++ > 10){
+      writeln("Failed to Connect: Timeout");
       return -1;
     }
-  }
-  Serial.println('\n');
-  Serial.print("Connected to ");
-  Serial.println(WiFi.SSID());              // Tell us what network we're connected to
-  Serial.print("IP address:\t");
-  Serial.println(WiFi.localIP());           // Send the IP address of the ESP8266 to the computer
+  } 
+  
+  writeln(WiFi.SSID().c_str());  
+  write("IP address:\t");  
+  writeln(WiFi.localIP().toString().c_str());
+  return 0;
 }
 
 int start_ap(){
   WiFi.softAP(configuration.ap_ssid, configuration.ap_pass);             // Start the access point
-  Serial.print("Access Point \"");
-  Serial.print(configuration.ap_ssid);
-  Serial.println("\" started");
+  
+  write("Access Point \"");  
+  writeln(configuration.ap_ssid);  
+  writeln("\" started");  
+  write("IP address:\t");  
+  writeln(WiFi.softAPIP().toString().c_str());
+  return 0;
+}
 
-  Serial.print("IP address:\t");
-  Serial.println(WiFi.softAPIP());  
+ // Initialize the OLED display using Wire library
 
+
+
+static volatile bool StartReq = false;
+
+void IRAM_ATTR T9callback(){
+  StartReq=true;
 }
 
 void setup() {
-  
-
+  lastActionTime = millis();
   Serial.begin(115200);         // Start the Serial communication to send messages to the computer
   delay(10);
-  Serial.println('\n');
+  
+ 
+  pinMode(16, OUTPUT);
+  digitalWrite(16, LOW);
+  delay(50);
+  digitalWrite(16, HIGH);
+  
+  display.init();
+  
+  display.setLogBuffer(5, 30);
+  // display.flipScreenVertically();
 
-  pinMode(configuration.trigger_pin, INPUT_PULLUP);
-
-  SPIFFS.begin();                           // Start the SPI Flash Files System
+  display.setContrast(255);
+  display.flipScreenVertically();
+  SPIFFS.begin();                          
 
   //if no config file found, write config with defaults
   
@@ -157,9 +183,15 @@ void setup() {
     start_ap();  
   }
 
-  if (!MDNS.begin("esp8266")) {             // Start the mDNS responder for esp8266.local
-    Serial.println("Error setting up MDNS responder!");
-  }
+  esp_err_t err = mdns_init();
+    if (err) {
+        printf("MDNS Init failed: %d\n", err);
+        return;
+    }
+  mdns_hostname_set("LightPainter");
+    //set default instance
+  mdns_instance_name_set("NB Light Painter");
+
   Serial.println("mDNS responder started");
 
   server.on("/upload", HTTP_GET, []() {                 // if the client requests the upload page
@@ -194,23 +226,42 @@ void setup() {
 
   server.begin();                           // Actually start the server
   Serial.println("HTTP server started");
+  writeln("Click to Draw"); 
+  
+  touchAttachInterrupt(T9, T9callback, 28);
+  esp_sleep_enable_touchpad_wakeup();
+  
 }
 
 void loop() {
   server.handleClient();
   
-  if(digitalRead(configuration.trigger_pin) == 0){
-    delay(200); //make sure not boucing
-    //still pressed
-    if(digitalRead(configuration.trigger_pin) == 0){
-      Serial.println(millis());
-      delay(3000); //just wait 3 seconds until drawing bitmap
-      drawBMP(configuration.image_to_draw);
-      Serial.print("Drawing done ");
-      Serial.println(millis());
+  if(StartReq){  
+    noInterrupts();
+    writeln("Get Ready:");
+    //just wait 3 seconds until drawing bitmap
+    for(int i=1;i<4;i++){
+        delay(1000);
+        writeln(String(i).c_str());
     }
+    drawBMP(configuration.image_to_draw);
+    writeln("Drawing done ");    
+    delay(1000);    
+    clear();
+    writeln("Click to Draw"); 
+    StartReq=false;
+    lastActionTime = millis();
+    interrupts();   
+  }
+
+  if((lastActionTime+InactionTimeout) < millis() ){  
+       Serial.println("Going To Sleep"); 
+       delay(500); 
+       esp_deep_sleep_start();
   }
 }
+
+
 
 String getContentType(String filename) { // convert the file extension to the MIME type
   if (filename.endsWith(".html")) return "text/html";
@@ -230,7 +281,7 @@ String getContentType(String filename) { // convert the file extension to the MI
 }
 
 void handleRoot(){
-    String page = FPSTR(HTTP_HEAD);
+    String page = FPSTR(HTTP_HEADER);
     page.replace("{v}", "LED-Lightpainter");
     page += FPSTR(HTTP_STYLE);
     page += FPSTR(HTTP_JS_IMAGE);
@@ -240,7 +291,6 @@ void handleRoot(){
     page += F("<a href=\"/upload\">Upload File</a><br />");
     page += F("<a href=\"/list\">Select Image</a><p />");
     page += F("<form action=\"/action\" method=\"get\"><button name=\"action\" value=\"trigger\" type=\"submit\">Draw Image</button></form>");
-
     page += FPSTR(HTTP_END);
 
     server.send(200, "text/html", page);
@@ -249,7 +299,7 @@ void handleRoot(){
 }
 
 void handleTrigger(){
-    String page = FPSTR(HTTP_HEAD);
+    String page = FPSTR(HTTP_HEADER);
     page.replace("{v}", "Trigger");
     page += FPSTR(HTTP_STYLE);
     page += FPSTR(HTTP_JS_IMAGE);
@@ -265,8 +315,7 @@ void handleTrigger(){
     }
     page += FPSTR(HTTP_END);
 
-    server.send(200, "text/html", page);
-    
+    server.send(200, "text/html", page);   
 
 }
 
@@ -303,7 +352,7 @@ void handleFileUpload(){ // upload a new file to the SPIFFS
     filename = String();
   } else if(upload.status == UPLOAD_FILE_WRITE){
     if(fsUploadFile)
-      fsUploadFile.write(upload.buf, upload.currentSize); // Write the received bytes to the file
+      fsUploadFile.write(upload.buf, upload.currentSize); // write the received bytes to the file
   } else if(upload.status == UPLOAD_FILE_END){
     if(fsUploadFile) {                                    // If the file was successfully created
       fsUploadFile.close();                               // Close the file again
@@ -316,11 +365,12 @@ void handleFileUpload(){ // upload a new file to the SPIFFS
 }
 
 void handleFileUploadDialog(){
-    String page = FPSTR(HTTP_HEAD);
+    String page = FPSTR(HTTP_HEADER);
     page.replace("{v}", "File Upload");
     page += FPSTR(HTTP_STYLE);
     page += FPSTR(HTTP_JS_IMAGE);
     page += FPSTR(HTTP_HEAD_END);
+    page += F("<p><a href=\"/\">Back to Index</a><br /></p>");
     page += F("<h1>File Upload</h1><br />");
     page += F("<form action=\"/upload\" method=\"POST\" enctype=\"multipart/form-data\">");
     page += F("<input type=\"file\" name=\"data\">");
@@ -334,7 +384,7 @@ void handleFileUploadDialog(){
 }
 
 void handleSuccess(){
-  String page = FPSTR(HTTP_HEAD);
+  String page = FPSTR(HTTP_HEADER);
     page.replace("{v}", "Upload Success");
     page += FPSTR(HTTP_STYLE);
     page += FPSTR(HTTP_HEAD_END);
@@ -352,24 +402,29 @@ const String formatBytes(size_t const& bytes) {            // lesbare Anzeige de
 
 
 void handleFileList(){
-    FSInfo fs_info;  SPIFFS.info(fs_info);    // Füllt FSInfo Struktur mit Informationen über das Dateisystem
-    Dir dir = SPIFFS.openDir("/");            // Auflistung aller im Spiffs vorhandenen Dateien
-    String page = FPSTR(HTTP_HEAD);
-    int i=0;
+    Serial.println("listing /");
+    File root = SPIFFS.open("/");    
+    String page = FPSTR(HTTP_HEADER);
+   
     page.replace("{v}", "List Images");
     page += FPSTR(HTTP_STYLE);
     page += FPSTR(HTTP_JS_IMAGE);
     page += FPSTR(HTTP_HEAD_END);
+    page += F("<p><a href=\"/\">Back to Index</a><br /></p>");
     page += F("<form action=\"/config\" method=\"get\">");
     page += F("<select name=\"image\" size=\"10\" onchange=\"setImage(this)\">");
-    while (dir.next()) {
-        if(!dir.fileName().endsWith(".bmp"))
-          continue;
+    File file = root.openNextFile();
+    while (file) {
+        Serial.println(file.name());
+        if(String(file.name()).endsWith(".bmp"))
+        {
         //page += F("<option value=\"") + dir.fileName().substring(1) + "\">" + dir.fileName().substring(1) + F("</option>");
         page += F("<option value=\"");
-        page += dir.fileName(); //with "/"
-        page += String("\">") + dir.fileName().substring(1) ;
+        page += file.name(); //with "/"
+        page += String("\">") + String(file.name()).substring(1) ;
         page += F("</option>");
+        }
+        file = root.openNextFile();
     }
     page += F("</select>");
     page += F("<button type=\"submit\">Select</button></form>");
@@ -429,11 +484,11 @@ void handleConfig(){
       }
     }
       
-  String page = FPSTR(HTTP_HEAD);
+  String page = FPSTR(HTTP_HEADER);
   page.replace("{v}", "Config");
   page += FPSTR(HTTP_STYLE);
   page += FPSTR(HTTP_HEAD_END);
-
+  page += F("<p><a href=\"/\">Back to Index</a><br /></p>");
   page += F("<h1>LED-Lightpainter Config</h1><br />");
   page += F("<form method=\"get\">");
   page += F("LEDs: <input type=\"text\" name=\"no_LEDs\" value=\"");
@@ -489,7 +544,7 @@ void handleConfig(){
 void handleBrowseWifi(){
   int numberOfNetworks = WiFi.scanNetworks();
 
-  String page = FPSTR(HTTP_HEAD);
+  String page = FPSTR(HTTP_HEADER);
   page.replace("{v}", "Browse Wifi");
   page += FPSTR(HTTP_STYLE);
   page += FPSTR(HTTP_HEAD_END);
@@ -576,30 +631,23 @@ uint32_t read32(File& f) {
 
 void drawBMP(char *filename) {
   File     bmpFile;
-  int16_t  bmpWidth, bmpHeight;   // Image W+H in pixels
-  //uint8_t  bmpDepth;            // Bit depth (must be 24) but we dont use this
+  int16_t  bmpWidth, bmpHeight;   // Image W+H in pixels  
   uint32_t bmpImageoffset;        // Start address of image data in file
   uint32_t rowSize;               // Not always = bmpWidth; may have padding
-  //uint8_t  sdbuffer[3 * BUFF_SIZE];    // SD read pixel buffer (8 bits each R+G+B per pixel)
-  uint8_t * sdbuffer = (uint8_t *)malloc(configuration.no_of_leds *3);
-  boolean  goodBmp = false;            // Flag set to true on valid header parse
-  int16_t  w, h, row, col,i;             // to store width, height, row and column
-  //uint8_t  r, g, b;   // brg encoding line concatenated for speed so not used
-  uint8_t rotation;     // to restore rotation
-  uint8_t  tft_ptr = 0;  // buffer pointer
-
+  uint8_t * sdbuffer = (uint8_t *)malloc(configuration.no_of_leds *3); 
+  int16_t  w, h, i;             // to store width, height, row and column
   
-
   SPIFFS.begin();
   // Check file exists and open it
-  if ((bmpFile = SPIFFS.open(filename, "r")) == NULL) {
+  bmpFile = SPIFFS.open(filename, "r");
+  if (!bmpFile) {
     Serial.println(F("File not found")); // Can comment out if not needed
     free(sdbuffer);
     return;
   }
   pinMode(configuration.led_pin, OUTPUT);
 
-  Adafruit_NeoPixel pixels = Adafruit_NeoPixel(configuration.no_of_leds, configuration.led_pin, NEO_GRB + NEO_KHZ800);
+  Adafruit_NeoPixel pixels = Adafruit_NeoPixel(configuration.no_of_leds, configuration.led_pin, NEO_GRBW + NEO_KHZ800);
   
 
   // Parse BMP header to get the information we need
@@ -655,6 +703,7 @@ void drawBMP(char *filename) {
   bmpFile.close();
   
   //Clear pixels
+  pixels.fill(0,0, configuration.no_of_leds);
   pixels.clear();
   pixels.show();          
 
@@ -663,3 +712,31 @@ void drawBMP(char *filename) {
   free(sdbuffer);
   return;
  }
+
+ void writeln(const char* text) {  
+    display.clear();
+    // Print to the screen
+    display.println(text);
+    // Draw it to the internal screen buffer
+    display.drawLogBuffer(0, 0);
+    // Display it on the screen
+    display.display();  
+    Serial.println(text);
+}
+
+void write(const char* text) {  
+    display.clear();
+    // Print to the screen
+    display.print(text);
+    // Draw it to the internal screen buffer
+    display.drawLogBuffer(0, 0);
+    // Display it on the screen
+    display.display();      
+    Serial.print(text);
+}
+
+void clear(){
+  display.clear();
+  display.setLogBuffer(5, 30);
+  display.display();   
+}
