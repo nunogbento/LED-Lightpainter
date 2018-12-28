@@ -1,8 +1,8 @@
-##ESP32  LED-Lightpainter
+## ESP32  LED-Lightpainter
 
 Forked from the great work from [TheMasterFX](https://github.com/TheMasterFX/LED-Lightpainter). Adapted to use an esp32 board with OLED and touch buttons.
 
-##For
+## For
 A DIY Pixelstick clone for Light Painting using the ESP32 and a WS2812 Strip (Neopixel)
 ![LED-Lightpainter](documentation/led_painter.jpg)
 ## Introduction
